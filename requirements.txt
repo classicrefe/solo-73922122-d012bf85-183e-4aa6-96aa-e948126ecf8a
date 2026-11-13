@@ -1,0 +1,7 @@
+fastapi==0.162.5
+uvicorn[standard]==0.54.0
+pydicom==3.0.2
+python-multipart==0.0.33
+# 仅演示/测试需要，运行镜像中保留以便 `docker compose exec` 跑验收脚本
+httpx==0.28.1
+pytest==9.2.0

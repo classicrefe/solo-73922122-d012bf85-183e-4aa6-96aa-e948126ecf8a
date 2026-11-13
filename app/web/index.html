@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DICOM 统一标识入库平台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --line: #334155; --text: #e2e8f0;
+    --muted: #94a3b8; --accent: #38bdf8; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+  }
+  header { padding: 20px 28px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 28px 60px; display: grid; gap: 20px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card h2 { margin: 0 0 14px; font-size: 15px; color: var(--accent); }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  select, input[type=text] {
+    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0b1220; color: var(--text); font-size: 14px;
+  }
+  .row { display: flex; gap: 10px; align-items: flex-end; }
+  .row > div { flex: 1; }
+  button {
+    padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent);
+    background: var(--accent); color: #082f49; font-weight: 600; cursor: pointer; font-size: 14px;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .drop {
+    border: 1.5px dashed var(--line); border-radius: 10px; padding: 26px; text-align: center;
+    color: var(--muted); cursor: pointer; transition: border-color .15s;
+  }
+  .drop:hover, .drop.drag { border-color: var(--accent); color: var(--text); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .PUBLISHED { background: rgba(34,197,94,.15); color: var(--ok); }
+  .PENDING { background: rgba(245,158,11,.15); color: var(--warn); }
+  .FAILED { background: rgba(239,68,68,.15); color: var(--err); }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; display: none; }
+  .msg.ok { display: block; background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.4); }
+  .msg.err { display: block; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.4); }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tabs button { border-color: var(--line); background: transparent; color: var(--muted); }
+  .tabs button.active { color: var(--accent); border-color: var(--accent); }
+  .scroll { max-height: 360px; overflow: auto; }
+  a { color: var(--accent); }
+  .filelist { margin-top: 10px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>科研影像 DICOM 统一标识入库平台</h1>
+  <p>按研究项目隔离 · PatientID / Study / Series / SOP Instance UID 持久映射 · 嵌套序列引用同步替换 · 整批原子发布</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>① 选择研究项目并上传批次</h2>
+    <div class="row">
+      <div>
+        <label for="project">研究项目（不同项目标识映射完全隔离）</label>
+        <select id="project"></select>
+      </div>
+      <div style="flex:0 0 auto; padding-bottom:2px;">
+        <button class="secondary" id="refreshProjects" type="button">刷新项目</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px;">
+      <div>
+        <label for="newProject">或新建研究项目</label>
+        <input type="text" id="newProject" placeholder="输入新项目名称" />
+      </div>
+      <div style="flex:0 0 auto; padding-bottom:2px;">
+        <button class="secondary" id="createProject" type="button">创建</button>
+      </div>
+    </div>
+
+    <div style="margin-top:18px;">
+      <label>DICOM 文件（仅未压缩 Explicit/Implicit VR Little Endian）</label>
+      <div class="drop" id="drop">
+        点击选择，或把文件拖拽到此处
+        <input type="file" id="fileInput" multiple accept=".dcm,.dicom,application/dicom" style="display:none" />
+        <div class="hint" id="limitHint">加载限制中…</div>
+      </div>
+      <div class="filelist" id="fileList"></div>
+    </div>
+
+    <div class="row" style="margin-top:14px;">
+      <button id="uploadBtn" disabled type="button">上传并入库整批</button>
+      <span class="hint" id="sizeHint"></span>
+    </div>
+    <div class="msg" id="uploadMsg"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>② 批次记录</h2>
+      <div class="tabs">
+        <button data-view="batches" class="active" type="button">批次</button>
+        <button data-view="mappings" type="button">已发布映射</button>
+      </div>
+      <div id="batchesView" class="scroll">
+        <table>
+          <thead><tr><th>创建时间</th><th>状态</th><th>文件</th><th>操作</th></tr></thead>
+          <tbody id="batchRows"><tr><td colspan="4">暂无数据</td></tr></tbody>
+        </table>
+      </div>
+      <div id="mappingsView" class="scroll" style="display:none;">
+        <table>
+          <thead><tr><th>类型</th><th>源标识</th><th>目标标识</th></tr></thead>
+          <tbody id="mappingRows"><tr><td colspan="3">暂无数据</td></tr></tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:10px;">
+        <button class="secondary" id="refreshBtn" type="button">刷新列表</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>③ 批次详情</h2>
+      <div id="detail" class="hint">点击批次行查看详情与下载链接</div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let meta = { max_files: 20, max_total_bytes: 16 * 1024 * 1024 };
+let pickedFiles = [];
+
+const KIND_LABEL = {
+  patient_id: "PatientID", study_uid: "Study UID",
+  series_uid: "Series UID", sop_uid: "SOP UID",
+};
+
+async function api(path, options) {
+  const resp = await fetch(path, options);
+  const text = await resp.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
+  return data;
+}
+
+function showMsg(el, ok, text) {
+  el.className = "msg " + (ok ? "ok" : "err");
+  el.textContent = text;
+}
+
+async function loadMeta() {
+  meta = await api("/api/meta");
+  $("limitHint").textContent =
+    `单批最多 ${meta.max_files} 份，合计 ≤ ${meta.max_total_mib} MiB；坏文件或超限整批拒绝`;
+}
+
+async function loadProjects(selectId) {
+  const projects = await api("/api/projects");
+  const sel = $(selectId);
+  const current = sel.value;
+  sel.innerHTML = projects.map(p => `<option value="${p.id}">${p.name}</option>`).join("");
+  if (current && projects.some(p => p.id === current)) sel.value = current;
+}
+
+function renderPicked() {
+  const total = pickedFiles.reduce((s, f) => s + f.size, 0);
+  $("fileList").innerHTML = pickedFiles.length
+    ? pickedFiles.map(f => `<div>• ${f.name} — ${(f.size / 1024).toFixed(1)} KiB</div>`).join("")
+    : "";
+  $("sizeHint").textContent =
+    `${pickedFiles.length} 份 / 合计 ${(total / (1024 * 1024)).toFixed(2)} MiB`;
+  $("uploadBtn").disabled = pickedFiles.length === 0;
+}
+
+$("drop").addEventListener("click", () => $("fileInput").click());
+$("drop").addEventListener("dragover", (e) => { e.preventDefault(); $("drop").classList.add("drag"); });
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("drag"));
+$("drop").addEventListener("drop", (e) => {
+  e.preventDefault(); $("drop").classList.remove("drag");
+  pickedFiles = [...e.dataTransfer.files]; renderPicked();
+});
+$("fileInput").addEventListener("change", () => {
+  pickedFiles = [...$("fileInput").files]; renderPicked();
+});
+$("refreshProjects").addEventListener("click", () => loadProjects("project"));
+$("createProject").addEventListener("click", async () => {
+  const name = $("newProject").value.trim();
+  if (!name) return;
+  const body = new FormData(); body.append("name", name);
+  try {
+    await api("/api/projects", { method: "POST", body });
+    $("newProject").value = "";
+    await loadProjects("project");
+    showMsg($("uploadMsg"), true, `项目「${name}」已创建`);
+  } catch (err) { showMsg($("uploadMsg"), false, err.message); }
+});
+
+$("uploadBtn").addEventListener("click", async () => {
+  const total = pickedFiles.reduce((s, f) => s + f.size, 0);
+  if (pickedFiles.length > meta.max_files || total > meta.max_total_bytes) {
+    showMsg($("uploadMsg"), false, "超出单批数量或总大小限制，未发起上传");
+    return;
+  }
+  const fd = new FormData();
+  fd.append("project_id", $("project").value);
+  pickedFiles.forEach(f => fd.append("files", f, f.name));
+  $("uploadBtn").disabled = true;
+  try {
+    const batch = await api("/api/batches", { method: "POST", body: fd });
+    showMsg($("uploadMsg"), true, `批次 ${batch.id} 已发布，含 ${batch.file_count} 份重编码文件`);
+    pickedFiles = []; $("fileInput").value = ""; renderPicked();
+    await loadBatches();
+    showDetail(batch.id);
+  } catch (err) {
+    showMsg($("uploadMsg"), false, "入库失败（无部分批次、已有映射未改动）：" + err.message);
+  } finally {
+    $("uploadBtn").disabled = pickedFiles.length === 0;
+  }
+});
+
+async function loadBatches() {
+  const projectId = $("project").value;
+  const rows = await api(`/api/batches?project_id=${encodeURIComponent(projectId)}`);
+  const tbody = $("batchRows");
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="4">暂无数据</td></tr>'; return; }
+  tbody.innerHTML = rows.map(b => `
+    <tr style="cursor:pointer" data-batch="${b.id}">
+      <td>${b.created_at}</td>
+      <td><span class="pill ${b.status}">${b.status}</span>${b.error ? `<div class="hint">${b.error}</div>` : ""}</td>
+      <td>${b.file_count}</td>
+      <td>${b.status === "PUBLISHED"
+        ? `<a href="/api/batches/${b.id}/download">下载 ZIP</a>` : "—"}</td>
+    </tr>`).join("");
+  tbody.querySelectorAll("tr[data-batch]").forEach(tr =>
+    tr.addEventListener("click", () => showDetail(tr.dataset.batch)));
+}
+
+async function loadMappings() {
+  const projectId = $("project").value;
+  const rows = await api(`/api/mappings?project_id=${encodeURIComponent(projectId)}`);
+  const tbody = $("mappingRows");
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="3">暂无数据</td></tr>'; return; }
+  tbody.innerHTML = rows.map(m => `
+    <tr><td>${KIND_LABEL[m.id_kind] || m.id_kind}</td>
+    <td><code>${m.source_value}</code></td>
+    <td><code>${m.target_value}</code></td></tr>`).join("");
+}
+
+async function showDetail(batchId) {
+  const b = await api(`/api/batches/${batchId}`);
+  const files = (b.files || []).map(f =>
+    `<tr><td><code>${f.archive_entry}</code></td><td>${f.original_name}</td><td>${f.size_bytes}</td></tr>`
+  ).join("");
+  $("detail").className = "";
+  $("detail").innerHTML = `
+    <table>
+      <tr><th>批次 ID</th><td><code>${b.id}</code></td></tr>
+      <tr><th>状态</th><td><span class="pill ${b.status}">${b.status}</span></td></tr>
+      <tr><th>文件数 / 输出字节</th><td>${b.file_count} / ${b.total_bytes}</td></tr>
+      <tr><th>创建 / 发布时间</th><td>${b.created_at} / ${b.published_at || "—"}</td></tr>
+      ${b.error ? `<tr><th>错误</th><td>${b.error}</td></tr>` : ""}
+    </table>
+    ${b.status === "PUBLISHED" ? `<p><a href="/api/batches/${b.id}/download">⬇ 下载重编码整批 ZIP</a></p>` : ""}
+    <table><thead><tr><th>ZIP 内文件名</th><th>原始文件名</th><th>字节</th></tr></thead>
+    <tbody>${files || '<tr><td colspan="3">无</td></tr>'}</tbody></table>`;
+}
+
+document.querySelectorAll(".tabs button").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  const isMappings = btn.dataset.view === "mappings";
+  $("mappingsView").style.display = isMappings ? "" : "none";
+  $("batchesView").style.display = isMappings ? "none" : "";
+  if (isMappings) loadMappings(); else loadBatches();
+}));
+$("refreshBtn").addEventListener("click", () => {
+  loadBatches();
+  if ($("mappingsView").style.display !== "none") loadMappings();
+});
+$("project").addEventListener("change", () => { loadBatches(); loadMappings(); });
+
+(async function init() {
+  await loadMeta();
+  await loadProjects("project");
+  await loadBatches();
+})();
+</script>
+</body>
+</html>

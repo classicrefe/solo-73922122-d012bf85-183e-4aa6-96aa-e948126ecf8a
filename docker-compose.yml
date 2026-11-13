@@ -1,0 +1,25 @@
+services:
+  dicom-remap:
+    build: .
+    image: dicom-remap:1.0.0
+    container_name: dicom-remap
+    ports:
+      - "8000:8000"
+    environment:
+      # 单批限额：20 份 / 16 MiB
+      DICOM_REMAP_MAX_FILES: "20"
+      DICOM_REMAP_MAX_TOTAL_BYTES: "16777216"
+      DICOM_REMAP_LOCK_WAIT: "60"
+      GENERATE_SAMPLES: "true"
+    volumes:
+      - dicom-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-I", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 8s
+
+volumes:
+  dicom-data:
