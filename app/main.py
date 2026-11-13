@@ -10,7 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db
+from . import catalog, db
 from .config import settings
 from .dicom import DicomValidationError
 from .ids import ID_KINDS
@@ -34,6 +34,8 @@ async def lifespan(app: FastAPI):
     with _init_lock:
         db.init_db()
         recover_on_startup()
+        # 仅续建历史遗留的未完成目录（NULL/PENDING）；FAILED 等用户显式重试
+        catalog.auto_resume_on_startup()
     yield
 
 
@@ -202,6 +204,105 @@ def get_meta():
         "max_total_mib": settings.max_total_bytes / (1024 * 1024),
         "id_kinds": ID_KINDS,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 项目引用核查：实例/引用目录状态、后台补建、缺项查询
+# --------------------------------------------------------------------------- #
+@app.get("/api/catalog/backfill")
+def get_backfill_status():
+    """后台补建运行态 + 全量目录覆盖度 + 各批次补建进度。"""
+    return catalog.backfill_status()
+
+
+@app.post("/api/catalog/backfill", status_code=202)
+async def start_catalog_backfill(retry_failed: bool = False):
+    """启动历史目录后台补建（已在运行则幂等返回）。
+
+    读 ZIP 与 pydicom 解析在后台线程执行且不持数据库写锁，上传流水线照常工作；
+    ``retry_failed=true`` 时同时重试此前因缺包/解析失败标记的批次。
+    """
+    state = await run_in_threadpool(catalog.start_backfill, retry_failed)
+    return {"accepted": True, "backfill": state}
+
+
+@app.get("/api/reference-check")
+def reference_check(project_id: str):
+    """项目引用核查结论。每次查询在同一已提交快照（单条只读事务）内完成。
+
+    覆盖全部历史批次及补建期间发布的批次（目录均为 DONE）后才给出缺项结论；
+    目录未完成（含缺包/解析失败的批次）时 ``complete=false``，不返回缺项清单，
+    页面据此只显示“未完成”，避免把“尚未补建”误报为“到齐/缺失”。
+    """
+    conn = db.connect()
+    try:
+        _get_project_or_404(conn, project_id)
+        # 显式只读事务（DEFERRED：首个读语句才开始，WAL 下固定读快照，
+        # 纯读不会升级为写锁，即便补建/发布线程正在写也不阻塞）：本次查询内
+        # 所有读语句都基于同一已提交状态，读不到进行到一半的数据。
+        conn.execute("BEGIN DEFERRED")
+        try:
+            coverage = db.project_catalog_coverage(conn, project_id)
+            if not coverage["complete"]:
+                builds = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT cb.* FROM catalog_builds cb "
+                        "JOIN batches b ON b.id = cb.batch_id "
+                        "WHERE b.project_id=? ORDER BY cb.batch_id",
+                        (project_id,),
+                    ).fetchall()
+                ]
+                result = {
+                    "project_id": project_id,
+                    "complete": False,
+                    "coverage": coverage,
+                    "builds": builds,
+                    "missing": [],
+                }
+            else:
+                missing_rows = db.project_missing_references(conn, project_id)
+                missing = []
+                for row in missing_rows:
+                    sources = [
+                        dict(r)
+                        for r in db.project_missing_reference_sources(
+                            conn, project_id, row["target_referenced_uid"]
+                        )
+                    ]
+                    missing.append(
+                        {
+                            "target_referenced_uid": row["target_referenced_uid"],
+                            "source_referenced_uid": row["source_referenced_uid"],
+                            "reference_count": row["reference_count"],
+                            "source_batch_ids": (
+                                row["source_batch_ids"].split(",")
+                                if row["source_batch_ids"]
+                                else []
+                            ),
+                            "source_file_names": (
+                                row["source_file_names"].split(",")
+                                if row["source_file_names"]
+                                else []
+                            ),
+                            "sources": sources,
+                        }
+                    )
+                result = {
+                    "project_id": project_id,
+                    "complete": True,
+                    "coverage": coverage,
+                    "missing": missing,
+                    "missing_count": len(missing),
+                }
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+        return result
+    finally:
+        conn.close()
 
 
 # 静态前端（挂载在最后，避免覆盖 /api 路由）

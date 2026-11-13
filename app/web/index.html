@@ -58,6 +58,13 @@
   .scroll { max-height: 360px; overflow: auto; }
   a { color: var(--accent); }
   .filelist { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .DONE { background: rgba(34,197,94,.15); color: var(--ok); }
+  .RUNNING { background: rgba(56,189,248,.15); color: var(--accent); }
+  .INCOMPLETE { background: rgba(245,158,11,.15); color: var(--warn); }
+  .stat { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; margin: 10px 0; }
+  .stat span { background: #0b1220; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; }
+  .tagpath { font-size: 11px; }
+  details > summary { cursor: pointer; color: var(--accent); font-size: 13px; margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -134,6 +141,21 @@
       <div id="detail" class="hint">点击批次行查看详情与下载链接</div>
     </section>
   </div>
+
+  <section class="card">
+    <h2>④ 项目引用核查（已分配 UID 但影像尚未到库的缺项追档）</h2>
+    <p class="hint" style="margin-top:0">
+      按重编码后的 UID 关联已发布实例与任意嵌套序列中的 ReferencedSOPInstanceUID；
+      仅映射存在、其他项目有实例或来源批次未发布均不算到齐。查询只读取 SQLite 目录，不重读 ZIP。
+    </p>
+    <div class="row">
+      <button id="startBackfill" type="button">启动历史目录补建</button>
+      <button class="secondary" id="retryBackfill" type="button">重试失败批次</button>
+      <button class="secondary" id="refreshCheck" type="button">刷新核查结果</button>
+    </div>
+    <div id="backfillState" class="hint" style="margin-top:10px;">补建状态加载中…</div>
+    <div id="checkResult" class="hint" style="margin-top:14px;">请先选择研究项目后查看核查结论。</div>
+  </section>
 </main>
 
 <script>
@@ -288,12 +310,127 @@ $("refreshBtn").addEventListener("click", () => {
   loadBatches();
   if ($("mappingsView").style.display !== "none") loadMappings();
 });
-$("project").addEventListener("change", () => { loadBatches(); loadMappings(); });
+$("project").addEventListener("change", () => { loadBatches(); loadMappings(); loadReferenceCheck(); });
+
+// ---------------- 项目引用核查 ---------------- //
+let pollTimer = null;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function loadBackfillState() {
+  const st = await api("/api/catalog/backfill");
+  const cov = st.coverage || {};
+  const running = !!st.running;
+  $("startBackfill").disabled = running;
+  $("retryBackfill").disabled = running;
+  const cur = st.current_batch_id ? `，当前批次 <code>${esc(st.current_batch_id)}</code>` : "";
+  $("backfillState").innerHTML = `
+    <div class="stat">
+      <span>补建线程：<b class="pill ${running ? "RUNNING" : "DONE"}">${running ? "运行中" : "空闲"}</b></span>
+      <span>已发布批次：${cov.published_total ?? 0}</span>
+      <span>目录完成：${cov.catalog_done ?? 0}</span>
+      <span>进行中/待补：${cov.catalog_pending ?? 0} + ${cov.catalog_unknown ?? 0}</span>
+      <span>失败（缺包/解析失败）：${cov.catalog_failed ?? 0}</span>
+    </div>
+    <div class="hint">已处理批次 ${st.processed_batches ?? 0}，失败 ${st.failed_batches ?? 0}${cur}
+      ${st.last_error ? `<br/>最近错误：${esc(st.last_error)}` : ""}</div>`;
+  if (running) {
+    if (!pollTimer) pollTimer = setInterval(async () => {
+      try {
+        await loadBackfillState();
+        await loadReferenceCheck();
+      } catch (_) { /* 轮询容错 */ }
+    }, 1500);
+  } else if (pollTimer) {
+    clearInterval(pollTimer); pollTimer = null;
+  }
+  return st;
+}
+
+function renderBuilds(builds) {
+  if (!builds || !builds.length) return "";
+  const rows = builds.map(b => `
+    <tr>
+      <td><code>${esc(b.batch_id)}</code></td>
+      <td><span class="pill ${b.status}">${b.status}</span></td>
+      <td>${b.processed_files}/${b.total_files}</td>
+      <td>${b.error ? esc(b.error) : "—"}</td>
+    </tr>`).join("");
+  return `<details><summary>查看批次补建明细（${builds.length}）</summary>
+    <table><thead><tr><th>批次</th><th>状态</th><th>文件进度</th><th>错误</th></tr></thead>
+    <tbody>${rows}</tbody></table></details>`;
+}
+
+async function loadReferenceCheck() {
+  const projectId = $("project").value;
+  if (!projectId) return;
+  const data = await api(`/api/reference-check?project_id=${encodeURIComponent(projectId)}`);
+  const cov = data.coverage || {};
+  const el = $("checkResult");
+
+  if (!data.complete) {
+    el.className = "";
+    el.innerHTML = `
+      <p><span class="pill INCOMPLETE">核查未完成</span>
+        目录尚未覆盖全部已发布批次（完成 ${cov.catalog_done ?? 0}/${cov.published_total ?? 0}，
+        待补 ${cov.catalog_pending ?? 0}，失败 ${cov.catalog_failed ?? 0}）。
+        缺包或解析失败的批次会显示 FAILED，可点「重试失败批次」；全部完成后才给出缺项结论。</p>
+      ${renderBuilds(data.builds)}`;
+    return;
+  }
+
+  if (!data.missing_count) {
+    el.className = "";
+    el.innerHTML = `<p><span class="pill DONE">核查完成</span>
+      全部 ${cov.published_total} 个已发布批次目录就绪，所有 ReferencedSOPInstanceUID 均有同项目实例到齐，无缺项。</p>`;
+    return;
+  }
+
+  const cards = data.missing.map(m => `
+    <details>
+      <summary>缺失目标 <code>${esc(m.target_referenced_uid)}</code>
+        （源 UID <code>${esc(m.source_referenced_uid)}</code>，${m.reference_count} 处引用）</summary>
+      <table>
+        <thead><tr><th>来源批次</th><th>来源文件</th><th>标签路径</th><th>源引用 UID</th><th>目标引用 UID</th></tr></thead>
+        <tbody>${m.sources.map(s => `
+          <tr>
+            <td><code>${esc(s.source_batch_id)}</code></td>
+            <td><code>${esc(s.source_file_name)}</code></td>
+            <td class="tagpath"><code>${esc(s.tag_path)}</code></td>
+            <td><code>${esc(s.source_referenced_uid)}</code></td>
+            <td><code>${esc(s.target_referenced_uid)}</code></td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </details>`).join("");
+  el.className = "";
+  el.innerHTML = `<p><span class="pill INCOMPLETE">核查完成</span>
+      发现 <b>${data.missing_count}</b> 个已分配 UID 但本项目尚无实例到库的缺失目标，请向导出方补要对应文件：</p>${cards}`;
+}
+
+$("startBackfill").addEventListener("click", async () => {
+  try {
+    await api("/api/catalog/backfill", { method: "POST" });
+    await loadBackfillState();
+  } catch (err) { showMsg($("uploadMsg"), false, err.message); }
+});
+$("retryBackfill").addEventListener("click", async () => {
+  try {
+    await api("/api/catalog/backfill?retry_failed=true", { method: "POST" });
+    await loadBackfillState();
+  } catch (err) { showMsg($("uploadMsg"), false, err.message); }
+});
+$("refreshCheck").addEventListener("click", () => { loadBackfillState(); loadReferenceCheck(); });
 
 (async function init() {
   await loadMeta();
   await loadProjects("project");
   await loadBatches();
+  await loadBackfillState();
+  await loadReferenceCheck();
 })();
 </script>
 </body>

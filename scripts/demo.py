@@ -234,6 +234,77 @@ def main() -> int:
         r_many = _upload(client, base, proj_a, many)
         check(r_many.status_code in (400, 413), f"超过 20 份被拒绝 (HTTP {r_many.status_code})")
 
+        print("== 场景 7：项目引用核查（实例/引用目录 + 缺项 + 后台补建） ==")
+        # 新批次目录随发布事务写入，覆盖全部已发布批次后可直接给出结论；
+        # batch_a 的 a2 含一个前向引用 SOP_FUTURE_UID，目标实例从未到库 -> 缺项
+        rc = client.get(f"{base}/api/reference-check", params={"project_id": proj_a}).json()
+        check(rc["complete"] is True, "引用核查目录完整（发布即建目录）")
+        missing_targets = {m["target_referenced_uid"] for m in rc["missing"]}
+        check(
+            mapping_a[("sop_uid", SAMPLE_SOURCE_UIDS["sop_future"])] in missing_targets,
+            "前向引用的重编码目标 UID 出现在缺项清单",
+        )
+        # 缺项带来源批次/文件/标签路径
+        if rc["missing"]:
+            src = rc["missing"][0]["sources"][0]
+            check(bool(src["source_batch_id"]) and bool(src["source_file_name"])
+                  and src["tag_path"].endswith("ReferencedSOPInstanceUID"),
+                  "缺项含来源批次、文件与嵌套标签路径")
+        # 已到库的同批/跨批引用（SOP A1）不应误报缺项
+        check(
+            mapping_a[("sop_uid", SAMPLE_SOURCE_UIDS["sop_a1"])] not in missing_targets,
+            "已到库实例的引用不误报缺项",
+        )
+
+        # 模拟“历史批次无目录”：清空后通过后台补建重建，查询不重读 ZIP
+        import app.catalog as catalog_mod
+        from app import db as db_mod
+        conn = db_mod.connect()
+        with db_mod.transaction(conn):
+            conn.execute("DELETE FROM instance_references")
+            conn.execute("DELETE FROM instances")
+            conn.execute("DELETE FROM catalog_builds")
+        conn.close()
+        rc_gap = client.get(f"{base}/api/reference-check",
+                            params={"project_id": proj_a}).json()
+        check(rc_gap["complete"] is False and rc_gap["missing"] == [],
+              "目录未覆盖全部批次时不给出缺项结论（显示未完成）")
+
+        import zipfile as _zipfile
+        real_zip = _zipfile.ZipFile
+        zip_reads = {"n": 0}
+
+        class _TrackingZip(real_zip):
+            def __init__(self, *a, **kw):
+                zip_reads["n"] += 1
+                super().__init__(*a, **kw)
+
+        catalog_mod.zipfile.ZipFile = _TrackingZip
+        client.get(f"{base}/api/reference-check", params={"project_id": proj_a})
+        check(zip_reads["n"] == 0, "核查查询只读 SQLite，不重读 ZIP")
+        catalog_mod.zipfile.ZipFile = real_zip
+
+        r_bf = client.post(f"{base}/api/catalog/backfill")
+        check(r_bf.status_code == 202, "后台补建已接受 (HTTP 202)")
+        for _ in range(200):
+            bf = client.get(f"{base}/api/catalog/backfill").json()
+            if not bf["running"]:
+                break
+            time.sleep(0.1)
+        check(bf["coverage"]["complete"] is True, "补建覆盖全部历史批次")
+        rc_after = client.get(f"{base}/api/reference-check",
+                              params={"project_id": proj_a}).json()
+        check(rc_after["complete"] is True and rc_after["missing_count"] >= 1,
+              "补建后缺项结论恢复，且不重复记引用")
+        # 幂等：引用目录无重复行
+        conn = db_mod.connect()
+        dup = conn.execute(
+            "SELECT COUNT(*) n FROM (SELECT source_file_id, tag_path, COUNT(*) c "
+            "FROM instance_references GROUP BY source_file_id, tag_path HAVING c > 1)"
+        ).fetchone()["n"]
+        conn.close()
+        check(dup == 0, "补建幂等：无重复引用记录")
+
     print()
     if failures:
         print(f"演示结束：{len(failures)} 项失败")

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import db
+from .catalog import build_publish_catalog_entry, extract_source_view
 from .config import settings
 from .dicom import DicomValidationError, ParsedFile, parse_and_validate, remap_to_bytes
 from .ids import ID_KINDS
@@ -145,12 +146,17 @@ def process_batch(project_id: str, files: list[UploadedFile]) -> str:
     # ---- 阶段 3：转换，不持有任何数据库事务/写锁 ----------------------------- #
     file_records: list[dict] = []
     total_out = 0
+    catalog: dict[str, dict] = {}
     try:
         for parsed in parsed_files:
+            # 重写会就地修改 parsed.dataset，必须先采集重编码前的源引用视图
+            source_view = extract_source_view(parsed)
             encoded = remap_to_bytes(parsed, mapping)
             entry = safe_filename(parsed.filename)
             out_path = work_dir / entry
             out_path.write_bytes(encoded)
+            # 从重编码产物提取目标侧视图并配对，生成实例/引用目录记录
+            catalog[entry] = build_publish_catalog_entry(source_view, encoded)
             file_records.append(
                 {
                     "original_name": parsed.filename,
@@ -174,7 +180,7 @@ def process_batch(project_id: str, files: list[UploadedFile]) -> str:
     final_zip = settings.published_dir / zip_name
     try:
         os.replace(temp_zip, final_zip)
-        db.publish_batch(conn, batch_id, file_records, zip_name, total_out)
+        db.publish_batch(conn, batch_id, file_records, zip_name, total_out, catalog)
     except Exception as exc:
         # DB 提交失败：zip 还未被任何已提交批次引用，作为孤儿在下次启动清理；
         # 这里立即删除以保证“不留部分批次”，并回收本批次 PENDING 映射。
